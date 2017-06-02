@@ -1,3 +1,13 @@
+/*
+Purpose:
+    - To find keys and values used for translations
+    - Merge with any previously found keys without values (found in 'find-i18n-keys' step)
+    - Write those keys/values to a default (base language, en) json file.
+
+A later task will take all those keys and values and translate them
+*/
+
+
 import gulp from 'gulp';
 import project from '../aurelia.json';
 import through from 'through2';
@@ -6,36 +16,53 @@ import mkdirp from 'mkdirp';
 import path from 'path';
 
 import jsdom from 'jsdom';
-import sync from 'i18next-json-sync';
+// import sync from 'i18next-json-sync';
 import deep from 'deep-diff';
-import translate from 'google-translate-api';
 
-import processi18n from './process-i18n';
+import findi18nKeys from './find-i18n-keys';
+import translateLocales from './translate-locales';
 
 let allLocales = {};
 let mismatchedLocaleLog = [];
 
+let localeFiles = project.localeProcessor.source;
+let relativeLocaleFiles = '../../' + localeFiles; //Moving up two directories due to command being run in tasks folder
+
+let languages = project.localeProcessor.languages;
+let primaryLanguage = languages[0];
+
+function getLocationOfTranslationKeys(locale, namespace) {
+    //Set this to define where you stored your previously found keys (from find i18n keys step)
+    return  `../../locales/${locale}/toTranslate_${namespace}.json`;
+}
+function getLocationOfExistingLocales(locale, namespace) {
+    //Set this to define where you stored your previously created locales
+    return `../../locales/${locale}/${namespace}.json`;
+}
+
 export default gulp.series(
-    processi18n, //Used as an initial setting for keys. If we have any mismatch with getting the actual phrases, we need to notify
-    getPhrases, //Get's the words inside the elements that contain the i18n attribute. Used for automatic translation.
+    findi18nKeys, //Used as an initial setting for keys. If we have any mismatch with getting the actual phrases, we need to notify
+    getPhrasesToTranslate, //Get's the words inside the elements that contain the i18n attribute. Used for automatic translation.
     writeToLocaleFiles, //Write out our phrases to the Locale file
     translateLocales, //Translate the English Locale file to all the others
     //syncLocales
 );
 
-export function syncLocales() {
-    //Since we're basing everything off of the EN Locale, this should be redundant. However, if we were to change just one locale, we want a means to check for differences
-    return sync({
-        files: '../../locales/**/*.json',
-        primary: 'en'
-    });
-}
+// export function syncLocales() {
+//     //Since we're basing everything off of the EN Locale, this should be redundant. However, if we were to change just one locale, we want a means to check for differences
+//     return sync({
+//         files: relativeLocaleFiles, //'../../locales/**/*.json',
+//         primary: 'en'
+//     });
+// }
 
 //Executions
-function getPhrases() {
-    return gulp.src(project.localeProcessor.translate)
+function getPhrasesToTranslate() {
+    return gulp.src(project.localeProcessor.translateFiles)
         .pipe(through.obj((file, enc, cb) => {
-            if (path.extname(file.path) === '.js') { //Don't have a way to get translation from javascript files, will have to manually add those
+            if (path.extname(file.path) === '.js') {
+                //Don't have a way to get translation from javascript files, will have to manually add those
+                //Going to leave the default value in place from the find keys step (default value is __NEEDS_TRANSLATION__)
                 return cb(null, file);
             }
             let promise = new Promise((resolve, reject) => { //Going to "load"/"render" the DOM so we can easily strip out the initial translations
@@ -46,10 +73,13 @@ function getPhrases() {
                             console.log('Trouble making the window for scraping');
                             console.log(err);
                         }
-                        let namespacedKeys = {};
+                        let namespacedKeyStore = {};
 
                         let templateInstance = createElementFromTemplatesOnWindow(window);
                         if (!templateInstance) {
+                            // No template tag to search inside. Skipping
+                            // TODO: Future, allow some kind of searching without needing template tags
+                            //      Right now we use template tags to make sure we're only translating code we wrote in Aurelia (which uses template tags)
                             console.log('Not searching file for translation phrases:');
                             console.log(file.path);
                             resolve();
@@ -58,13 +88,13 @@ function getPhrases() {
 
                         //Strange bug with querySelectorAll and passing multiple selectors. So we're going to make two seperate calls
                         let i18nElements = window.document.querySelectorAll('[i18n]');
-                        //let tElements = window.document.querySelectorAll('[t]');
+                        //let tElements = window.document.querySelectorAll('[t]'); //Until the github issue is resolved, we can't query attributes with single characters
                         let elementsToTranslate = Array.from(i18nElements);//.concat(Array.from(tElements));
 
                         if (elementsToTranslate.length > 0) {
-                            stripKeysToTranslate(elementsToTranslate, namespacedKeys);
+                            getKeysToTranslateOffElements(elementsToTranslate, namespacedKeyStore);
                         }
-                        addTextToTranslationFiles(namespacedKeys);
+                        mergeNewTranslationsWithExisting(namespacedKeyStore);
                         window.close(); //Helps with memory collection
                         resolve();
                     });
@@ -76,17 +106,19 @@ function getPhrases() {
 }
 function writeToLocaleFiles(cb) {
     //Writes new locale info to source local folder
+    //Only write default json file, translation task will write to appropriate files
     let localeFileWrites = [];
-    for (let locale in allLocales) {
-        let fileWritePromise = new Promise((resolve, reject) => {
-            for (let namespace in allLocales[locale]) {
-                fs.writeFile(`locales/${locale}/${namespace}.json`, JSON.stringify(allLocales[locale][namespace], null, '\t'), () => {
-                    resolve();
-                });
-            }
-        });
-        localeFileWrites.push(fileWritePromise);
-    }
+    //for (let locale in allLocales) {
+    let fileWritePromise = new Promise((resolve, reject) => {
+        for (let namespace in allLocales[primaryLanguage]) {
+            let sortedLocaleObject = sortJSON(allLocales[primaryLanguage][namespace]);
+            fs.writeFile(`locales/${primaryLanguage}/${namespace}.json`, JSON.stringify(sortedLocaleObject, null, '\t'), () => {
+                resolve();
+            });
+        }
+    });
+    localeFileWrites.push(fileWritePromise);
+    //}
     return Promise.all(localeFileWrites)
         .then(() => {
             if (mismatchedLocaleLog.length === 0) {
@@ -96,135 +128,98 @@ function writeToLocaleFiles(cb) {
             let timestamp = new Date().toISOString().replace(/:/g, '_').split('.');
             timestamp.splice(-1, 1);
             timestamp.join('.');
-            return fs.writeFile('locales/MismatchLog-' + timestamp + '.json', 'Diff by https://github.com/flitbit/diff \n' + JSON.stringify(mismatchedLocaleLog || [], null, '\t'), cb);
+            return fs.writeFile('locales/MismatchLog-' + timestamp + '.txt', 'Diff by https://github.com/flitbit/diff \n' + JSON.stringify(mismatchedLocaleLog || [], null, '\t'), cb);
         });
 }
-export function translateLocales() {
-    //Translates locale info and writes translations to source and output locales
-    return gulp.src(project.localeProcessor.source)
-        .pipe(through.obj((file, enc, cb) => {
-            let translationRequests = [];
-            console.log('translating file: ' + file.path);
-            let localeTranslation = JSON.parse(file.contents.toString());
-            let locale = file.dirname.replace(/\\/g, '/').split('/').pop();
-            console.log('translating to: ' + locale);
-            let namespace = path.basename(file.path, '.json');
-            //If not english, translate
-            if (locale !== 'en' && locale !== 'gb') {
-                //Go through each property and translate
-                traverse(localeTranslation, function(key, value, dotKey) { //TODO: `value` here is only a copy to the original. Would be much better if it were a reference
-                    if (typeof value === 'string') {
-                        if (value !== '__NEEDS_TRANSLATION__') {
-                            translationRequests.push(
-                                translate(value, {from: 'en', to: locale}).then(res => {
-                                    //localeTranslation[key] = res.text;
-                                    setTranslationKey(dotKey, res.text, localeTranslation, true);
-                                }).catch(err => {
-                                    console.error(err);
-                                })
-                            );
-                        } else {
-                            //Can we look at the english version to translate?
-                            //At this point, we already know our namespace by the file location
-                            //let namespaces = dotKey.split(':');
 
-                            let englishTranslation = getPropFromDot(allLocales['en'], `${namespace}.${dotKey}`);//enLocale, dotKey);
-                            if (englishTranslation) {
-                                translationRequests.push(
-                                    translate(englishTranslation, {from: 'en', to: locale}).then(res => {
-                                        //localeTranslation[key] = res.text;
-                                        setTranslationKey(dotKey, res.text, localeTranslation, true);
-                                    }).catch(err => {
-                                        console.error(err);
-                                    })
-                                );
-                            }
-                        }
-                    }
-                });
-            }
+/////////////////////////
+////Utility functions////
+/////////////////////////
 
-            Promise.all(translationRequests)
-                .then(() => {
-                    file.contents = new Buffer(JSON.stringify(localeTranslation, null, '\t'));
-                    cb(null, file);
-                });
-        }))
-        .pipe(gulp.dest('locales/'))
-        .pipe(gulp.dest(project.localeProcessor.output));
-}
-
-//Utility functions
-function addTextToTranslationFiles(namespacedKeys) {
+//Makes use of global allLocales to store all the locale info
+// If the key isn't used/found in use, then any unused key will be removed
+function mergeNewTranslationsWithExisting(namespacedKeyStore) {
     //Loop through each top level namespace
-    for (let namespace in namespacedKeys) {
+    for (let namespace in namespacedKeyStore) {
         //get the locale file to translate for each needed translation
-        for (let locale of project.localeProcessor.languages) {
-            let toTranslatePath = `../../locales/${locale}/toTranslate_${namespace}.json`;
-            let existingLocalePath = `../../locales/${locale}/${namespace}.json`;
+        let toTranslatePath = getLocationOfTranslationKeys(primaryLanguage, namespace); //`../../locales/${locale}/toTranslate_${namespace}.json`;
+        let existingLocalePath = getLocationOfExistingLocales(primaryLanguage, namespace); //`../../locales/${locale}/${namespace}.json`;
 
-            let toTranslateLocaleFile = {};
-            if (fs.existsSync(path.resolve(__dirname, toTranslatePath))) {
-                toTranslateLocaleFile = require(toTranslatePath);
-            } else {
-                //create file
-                try {
-                    mkdirp(path.dirname(toTranslatePath), (err) => {
-                        if (err) {
-                            console.log(err);
-                        }
-                        fs.writeFileSync(toTranslatePath, JSON.stringify(toTranslateLocaleFile));
-                    });
-                } catch (e) {
-                    console.log(e);
-                }
-            }
-
-            let existingLocaleFile = {};
-            if (fs.existsSync(path.resolve(__dirname, existingLocalePath))) {
-                existingLocaleFile = require(existingLocalePath);
-            } else {
-                //create file
-                try {
-                    mkdirp(path.dirname(existingLocalePath), (err) => {
-                        if (err) {
-                            console.log(err);
-                        }
-                        fs.writeFileSync(existingLocalePath, JSON.stringify(existingLocaleFile));
-                    });
-                } catch (e) {
-                    console.log(e);
-                }
-            }
-
-            //Initialize location for translation
-            allLocales[locale] = allLocales[locale] || {};
-            allLocales[locale][namespace] = allLocales[locale][namespace] || {};
-
-            let previouslyFoundLocales = JSON.parse(JSON.stringify(existingLocaleFile)); //Clone object for comparison
-            //Extend the allLocales (which will contain the final translations) with the translations that need to be translated (namespacedKeys[namespace])
-            //TODO: If the value is needing translation, look at the original to see if we can't re-use a translation
-            //DeepExtend(CurrentlyFoundLocales, ToTranslateLocales, ExistingTranslations, NewlyFoundLocales)
-            deepExtend(allLocales[locale][namespace], toTranslateLocaleFile, existingLocaleFile, namespacedKeys[namespace], (a, b) => {
-                if (!a || a === '__NEEDS_TRANSLATION__') { //Only overwrite if previous value needed translation
-                    return b;
-                }
-                return a;
-            });
-
-            //Compare existing english (since it's what we use as our base translation) locale with the new one to find any changes to log
-            if (locale === 'en') {
-                findMismatchedLocales(previouslyFoundLocales, allLocales[locale][namespace]);
+        let toTranslateLocaleFile = {}; //This will be what will build the master list
+        //get/create locale file to use for locales to translate
+        if (fs.existsSync(path.resolve(__dirname, toTranslatePath))) {
+            toTranslateLocaleFile = require(toTranslatePath);
+        } else {
+            //create file
+            try {
+                mkdirp(path.dirname(toTranslatePath), (err) => {
+                    if (err) {
+                        console.log(err);
+                    }
+                    fs.writeFileSync(toTranslatePath, JSON.stringify(toTranslateLocaleFile));
+                });
+            } catch (e) {
+                console.log(e);
             }
         }
+
+        let existingLocaleFile = {}; //This is just used for comparison to what has changed
+        //get/create locale file to use for existing locales
+        if (fs.existsSync(path.resolve(__dirname, existingLocalePath))) {
+            existingLocaleFile = require(existingLocalePath);
+        } else {
+            //create file
+            try {
+                mkdirp(path.dirname(existingLocalePath), (err) => {
+                    if (err) {
+                        console.log(err);
+                    }
+                    fs.writeFileSync(existingLocalePath, JSON.stringify(existingLocaleFile));
+                });
+            } catch (e) {
+                console.log(e);
+            }
+        }
+
+        //Initialize location for translation
+        allLocales[primaryLanguage] = allLocales[primaryLanguage] || {};
+        allLocales[primaryLanguage][namespace] = allLocales[primaryLanguage][namespace] || {};
+
+        let previouslyFoundLocales = JSON.parse(JSON.stringify(existingLocaleFile)); //Clone object for comparison
+
+        // Extend the allLocales (which will contain the final translations) with the translations that need to be translated (namespacedKeys[namespace])
+        // Take what we currently have (allLocales),
+        //      merge with any new keys found (toTranslateLocaleFile),
+        //      WILL NOT merge with any existing translations (existingLocaleFile), (THIS IS BECAUSE IF IT WAS NOT A FOUND KEY, WE WILL NOT NEED IT, server keys should be in a different namespace)
+        //      ^^ But we still need to keep any previous translations
+        //      then merge in our newly found key/values (namespacedKeyStore)
+        // If a key has a previous value, and the new value is "__NEEDS_TRANSLATION__", then use the old value.
+        deepExtend(allLocales[primaryLanguage][namespace], toTranslateLocaleFile, existingLocaleFile, namespacedKeyStore[namespace], (a, b) => {
+            if (!a || a === '__NEEDS_TRANSLATION__') { //Only overwrite if previous value needed translation
+                return b;
+            }
+            return a;
+        });
+        // TODO: only trim away if we haven't detected any dynamic portion of a key
+        // Now trim away any translations that aren't being used
+        //traverse(allLocales[primaryLanguage][namespace], function(key, value, dotKey, parent) {
+        //    if (!getPropFromDot(toTranslateLocaleFile, dotKey)) {
+        //        delete parent[key];
+        //    }
+        //});
+
+        //Compare existing (primaryLanguage) english (since it's what we use as our base translation) locale with the new one to find any changes to log
+        findMismatchedLocales(previouslyFoundLocales, allLocales[primaryLanguage][namespace]);
     }
+    return allLocales;
 }
-function setTranslationKey(key, value, keys, silent = false) { // "home.title.foo", "title.foo", "foo"
+function setTranslationKey(key, value, keys, originalKey) { // "home.title.foo", "title.foo", "foo"
     //Used to set the translation key deep in the locale object
+    originalKey = originalKey || key;
     let keyParts = key.split('.');
     if (keyParts.length === 1) { //End of the line
-        if (keys[key] && !silent) {
-            console.log(`Duplicate translation key (${key}) found. Last in wins.`);
+        if (keys[key] && keys[key] !== value) {
+            console.log('\x1b[47m\x1b[47m%s\x1b[0m', `Duplicate translation key found with mismatched values. Last in wins.\n  - Key:${originalKey}\n  - original: ${keys[key]}\n  - new: ${value}`);
         }
         return keys[key] = value;
     }
@@ -232,7 +227,7 @@ function setTranslationKey(key, value, keys, silent = false) { // "home.title.fo
     if (!keys[keyParts[0]]) {
         keys[keyParts[0]] = {};
     }
-    setTranslationKey(keyParts.slice(1, keyParts.length).join('.'), value, keys[keyParts[0]], silent);
+    setTranslationKey(keyParts.slice(1, keyParts.length).join('.'), value, keys[keyParts[0]], originalKey);
 }
 function deepExtend(out) {
     out = out || {};
@@ -244,7 +239,7 @@ function deepExtend(out) {
     for (let i = 1; i < arguments.length; i++) {
         let obj = arguments[i];
 
-        if (!obj || typeof obj === 'function') {
+        if (!obj || typeof obj === 'function') { 
             continue;
         }
 
@@ -268,19 +263,6 @@ function deepExtend(out) {
 
     return out;
 }
-function traverse(obj, func, passedDotKey = '') {
-    for (let key in obj) {
-        let dotKey = passedDotKey.length === 0 ? (passedDotKey + `${key}`) : (passedDotKey + `.${key}`);
-        func.apply(this, [key, obj[key], dotKey]);
-        if (obj[key] !== null && typeof(obj[key]) === 'object') {
-            //going on step down in the object tree!!
-            traverse(obj[key], func, dotKey);
-        }
-    }
-}
-function getPropFromDot(obj, dot) {
-    return dot.split('.').reduce((a, b) => a[b], obj);
-}
 function createElementFromTemplatesOnWindow(window) {
     //Create "Template" in body
     let t = window.document.querySelector('template');
@@ -291,17 +273,14 @@ function createElementFromTemplatesOnWindow(window) {
     window.document.body.appendChild(tInstance);
     return tInstance;
 }
-function stripKeysToTranslate(elementsToTranslate, namespacedKeys) {
+function getKeysToTranslateOffElements(elementsToTranslate, namespacedKeyStore) {
     for (let elem of elementsToTranslate) {
         let i18nKey = elem.getAttribute('i18n');
         let tKey = elem.getAttribute('t');
         let translationKey = tKey || i18nKey;
-        let translationKeys = translationKey.split(';');
+        let translationKeys = translationKey.split(';'); // There can be multiple i18n commands, they're split by a semi-colon
 
         translationKeys.forEach(key => {
-            //TODO: Also need to check for namespacing separators (":")
-
-
             //If we have an `[html]` modifier, then lets get the innerHTML
             //Types:
             // [text]: Sets the textContent property (default)
@@ -341,11 +320,13 @@ function stripKeysToTranslate(elementsToTranslate, namespacedKeys) {
 
             let namespacedKey = key.split(':');
             if (namespacedKey.length > 1) {
-                namespacedKeys[namespacedKey[0]] = namespacedKeys[namespacedKey[0]] || {};
-                setTranslationKey(namespacedKey[1], currentElemText, namespacedKeys[namespacedKey[0]]);
+                //We have a namespace we need to consider
+                namespacedKeyStore[namespacedKey[0]] = namespacedKeyStore[namespacedKey[0]] || {}; //Initialize store with namespace if we don't have one
+                setTranslationKey(namespacedKey[1], currentElemText, namespacedKeyStore[namespacedKey[0]]);
             } else {
-                namespacedKeys.translation = namespacedKeys.translation || {}; //translation is default namespace
-                setTranslationKey(key, currentElemText, namespacedKeys.translation);
+                //Use the default namespace as one wasn't defined
+                namespacedKeyStore.translation = namespacedKeyStore.translation || {}; //translation is default namespace
+                setTranslationKey(key, currentElemText, namespacedKeyStore.translation);
             }
         });
     }
@@ -357,4 +338,29 @@ function findMismatchedLocales(oldLocale, newLocale) {
         return;
     }
     mismatchedLocaleLog = mismatchedLocaleLog.concat(diff || []);
+}
+function sortJSON(obj) {
+    let sortedObject = {};
+
+    Object.keys(obj).sort().forEach(function(key) {
+        if (typeof obj[key] === 'object') {
+            obj[key] = sortJSON(obj[key]);
+        }
+        sortedObject[key] = obj[key];
+    });
+
+    return sortedObject;
+}
+function traverse(obj, func, passedDotKey = '') {
+    for (let key in obj) {
+        let dotKey = passedDotKey.length === 0 ? (passedDotKey + `${key}`) : (passedDotKey + `.${key}`);
+        func.apply(this, [key, obj[key], dotKey, obj]);
+        if (obj[key] !== null && typeof(obj[key]) === 'object') {
+            //going on step down in the object tree!!
+            traverse(obj[key], func, dotKey);
+        }
+    }
+}
+function getPropFromDot(obj, dot) {
+    return dot.split('.').reduce((a, b) => a[b], obj);
 }

@@ -1,0 +1,19 @@
+Diff by https://github.com/flitbit/diff 
+[
+	{
+		"kind": "N",
+		"path": [
+			"Hello_World"
+		],
+		"rhs": "Hello World!"
+	},
+	{
+		"kind": "N",
+		"path": [
+			"Some"
+		],
+		"rhs": {
+			"Test": "__NEEDS_TRANSLATION__"
+		}
+	}
+]

@@ -30,6 +30,23 @@
     "fileExtension": ".scss",
     "source": "src/**/*.scss"
   },
+  "localeProcessor": {
+    "source": "locales/**/!(toTranslate_|MismatchLog)*.json",
+    "output": "scripts/locales",
+    "translateFiles": [
+      "src/**/*.{js,html}"
+    ],
+    "namespaces": [
+      "translation"
+    ],
+    "languages": [
+      "en",
+      "es",
+      "fr",
+      "pt",
+      "cy"
+    ]
+  },
   "editor": {
     "id": "vscode",
     "displayName": "Visual Studio Code"
@@ -71,7 +88,7 @@
             ".html",
             ".css"
           ],
-          "stub": true
+          "stub": false
         }
       ]
     },
@@ -132,6 +149,22 @@
             "path": "../node_modules/aurelia-testing/dist/amd",
             "main": "aurelia-testing",
             "env": "dev"
+          },
+          {
+            "name": "aurelia-i18n",
+            "main": "aurelia-i18n",
+            "path": "../node_modules/aurelia-i18n/dist/amd",
+            "resources": []
+          },
+          {
+              "name": "i18next",
+              "path": "../node_modules/i18next/dist/umd",
+              "main": "i18next"
+          },
+          {
+              "name": "i18next-browser-languagedetector",
+              "path": "../node_modules/i18next-browser-languagedetector/dist/umd",
+              "main": "i18nextBrowserLanguageDetector.min"
           }
         ]
       }
